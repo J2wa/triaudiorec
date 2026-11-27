@@ -54,6 +54,17 @@ Double-click **`build_exe.bat`** on Windows (or download the pre-built artifact 
 python -m tritrack --demo
 ```
 
+### Convert existing recordings
+
+Select one or more rows under **Recorded Output Files** and click **Convert Recordings…**.
+Use **Choose WAV or FLAC Files…** to convert older recordings or files from another folder.
+
+- **MP3** offers 96, 128, 192, 256, and 320 kbps. The default 192 kbps uses about 1.44 MB per minute per track.
+- **WAV** offers 16-bit PCM at 44.1 or 48 kHz. **FLAC** uses lossless 24-bit encoding at the original sample rate.
+- Set **Volume adjustment** above 0 dB for louder copies. The converter limits peaks when boosting the volume.
+
+The selected format and volume apply to every file in the batch. The converter saves each copy beside its original.
+
 ---
 
 ## Architecture Overview
