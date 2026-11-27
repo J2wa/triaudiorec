@@ -22,9 +22,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install system libsndfile (Linux)
+      - name: Install system audio and Qt libraries (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libsndfile1
+        run: sudo apt-get update && sudo apt-get install -y libsndfile1 libegl1 libgl1 libxkbcommon0 libfontconfig1
 
       - name: Install dependencies
         run: |
