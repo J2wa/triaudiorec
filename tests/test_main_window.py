@@ -2,12 +2,15 @@
 
 import time
 
+import numpy as np
 import soundfile as sf
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from tritrack.backends.simulated import SimulatedBackend
 from tritrack.config import BitDepth, OutputFormat, RecorderConfig
+from tritrack.converter import CONVERSION_PRESETS
 from tritrack.engine import EngineState, RecordingEngine
+from tritrack.ui.converter_dialog import ConverterDialog
 from tritrack.ui.main_window import MainWindow
 
 
@@ -74,3 +77,29 @@ def test_window_loads_settings_and_records_using_the_selected_format(tmp_path, m
         assert wav[0].frames > 0
     finally:
         window.close()
+
+
+def test_converter_dialog_exports_a_batch_with_the_selected_gain(tmp_path, monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    source_wav = tmp_path / "mic.wav"
+    source_flac = tmp_path / "system.flac"
+    sf.write(source_wav, np.full((4800, 2), 0.1), 48000, subtype="PCM_24")
+    sf.write(source_flac, np.full((4800, 2), 0.2), 48000, subtype="PCM_24")
+    dialog = ConverterDialog(None, str(tmp_path), [source_wav, source_flac])
+    wav_index = next(index for index, item in enumerate(CONVERSION_PRESETS) if item.sample_rate == 48000)
+    dialog._preset.setCurrentIndex(wav_index)
+    dialog._gain.setValue(6)
+    dialog._convert.click()
+
+    deadline = time.monotonic() + 5
+    while dialog._worker is not None and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+
+    assert dialog._status.text() == "Saved 2 of 2 converted files."
+    mic, _ = sf.read(tmp_path / "mic_16bit_48k.wav")
+    system, _ = sf.read(tmp_path / "system_16bit_48k.wav")
+    np.testing.assert_allclose(mic, 0.2, atol=0.002)
+    np.testing.assert_allclose(system, 0.4, atol=0.002)
+    dialog.close()

@@ -35,6 +35,7 @@ from ..backends.base import AudioDeviceInfo
 from ..config import BitDepth, OutputFormat, RecorderConfig
 from ..engine import EngineState, RecordingEngine
 from ..writer import RecordingSummary
+from .converter_dialog import ConverterDialog
 from .meters import StereoMeterWidget
 from .theme import STUDIO_QSS
 
@@ -405,6 +406,9 @@ class MainWindow(QMainWindow):
         hdr_row.addWidget(hdr)
         hdr_row.addStretch()
         hdr_row.addWidget(self._error_label)
+        self._convert_btn = QPushButton("Convert Recordings…")
+        self._convert_btn.clicked.connect(self._on_convert_recordings)
+        hdr_row.addWidget(self._convert_btn)
         lay.addLayout(hdr_row)
 
         self._outputs_table = QTableWidget(0, 5)
@@ -569,8 +573,16 @@ class MainWindow(QMainWindow):
             self._sr_combo,
             self._bitdepth_combo,
             self._prefix_edit,
+            self._convert_btn,
         ):
             widget.setEnabled(not locked)
+
+    def _on_convert_recordings(self) -> None:
+        model = self._outputs_table.selectionModel()
+        sources = [Path(index.data()) for index in model.selectedRows(4)]
+        dialog = ConverterDialog(self, self._config.output_dir, sources)
+        dialog.exec()
+        dialog.deleteLater()
 
     def _on_record_clicked(self) -> None:
         try:
