@@ -63,6 +63,18 @@ jobs:
             --hidden-import pyaudiowpatch `
             src/tritrack/__main__.py
 
+      - name: Smoke test TriTrackStudio.exe
+        run: |
+          $proc = Start-Process -FilePath ".\dist\TriTrackStudio.exe" -ArgumentList "--version" -PassThru
+          if (-not $proc.WaitForExit(30000)) {
+            $proc.Kill()
+            throw "TriTrackStudio.exe --version timed out (possible unhandled exception dialog)"
+          }
+          $proc.WaitForExit()
+          if ($proc.ExitCode -ne 0) {
+            throw "TriTrackStudio.exe --version exited with code $($proc.ExitCode)"
+          }
+
       - name: Upload Windows executable artifact
         uses: actions/upload-artifact@v4
         with:

@@ -6,10 +6,10 @@ import argparse
 import logging
 import sys
 
-from . import __app_name__, __version__
-from .backends import create_backend
-from .config import RecorderConfig
-from .engine import RecordingEngine
+from tritrack import __app_name__, __version__
+from tritrack.backends import create_backend
+from tritrack.config import RecorderConfig
+from tritrack.engine import RecordingEngine
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     config = RecorderConfig.load()
     engine = RecordingEngine(backend=backend, config=config)
 
-    from .ui.main_window import MainWindow
+    from tritrack.ui.main_window import MainWindow
 
     window = MainWindow(engine)
     window.show()
