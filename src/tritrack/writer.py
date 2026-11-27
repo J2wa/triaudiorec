@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from itertools import count
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -108,22 +109,52 @@ class TriTrackWriter:
 
     def _open_files(self) -> None:
         target_formats = self._target_formats()
+        outputs = [
+            (track_id, f"{suffix}.{ext}", label, sf_fmt, subtype)
+            for track_id, suffix, label in self.TRACK_SPECS
+            for ext, sf_fmt, subtype in target_formats
+        ]
+        paths = self._reserve_output_paths([suffix for _, suffix, _, _, _ in outputs])
         try:
-            for track_id, suffix, label in self.TRACK_SPECS:
-                for ext, sf_fmt, subtype in target_formats:
-                    path = self.output_dir / f"{self.session_name}_{suffix}.{ext}"
-                    handle = sf.SoundFile(
-                        str(path),
-                        mode="w",
-                        samplerate=self.sample_rate,
-                        channels=self.channels,
-                        subtype=subtype,
-                        format=sf_fmt,
-                    )
-                    self._handles[track_id].append((handle, label, sf_fmt, subtype, path))
+            for (track_id, _, label, sf_fmt, subtype), path in zip(outputs, paths):
+                handle = sf.SoundFile(
+                    str(path),
+                    mode="w",
+                    samplerate=self.sample_rate,
+                    channels=self.channels,
+                    subtype=subtype,
+                    format=sf_fmt,
+                )
+                self._handles[track_id].append((handle, label, sf_fmt, subtype, path))
         except Exception:
-            self.close()
+            try:
+                self.close()
+            finally:
+                for path in paths:
+                    path.unlink(missing_ok=True)
             raise
+
+    def _reserve_output_paths(self, suffixes: List[str]) -> List[Path]:
+        """Allocate a shared session name without opening existing recordings for writing."""
+        base_name = self.session_name
+        for take in count(1):
+            name = base_name if take == 1 else f"{base_name}_{take}"
+            paths: List[Path] = []
+            try:
+                for suffix in suffixes:
+                    path = self.output_dir / f"{name}_{suffix}"
+                    path.touch(exist_ok=False)
+                    paths.append(path)
+            except FileExistsError:
+                for path in paths:
+                    path.unlink()
+            except OSError:
+                for path in paths:
+                    path.unlink()
+                raise
+            else:
+                self.session_name = name
+                return paths
 
     @property
     def total_frames(self) -> int:

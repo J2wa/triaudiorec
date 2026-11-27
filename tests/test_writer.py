@@ -138,3 +138,19 @@ def test_config_json_persistence(tmp_path: Path) -> None:
     cfg.save(cfg_path)
     loaded = RecorderConfig.load(cfg_path)
     assert loaded == cfg
+
+
+def test_writer_preserves_an_earlier_take_with_the_same_timestamp(tmp_path: Path) -> None:
+    timestamp = datetime(2026, 11, 26, 12, 0, 0)
+    first = TriTrackWriter(tmp_path, timestamp=timestamp, output_format=OutputFormat.BOTH)
+    audio = _make_stereo_sine(440.0, 880.0, 48000, 480)
+    first.write_block(audio, audio, audio)
+    first_summary = first.close()
+    original_files = {info.path: info.path.read_bytes() for info in first_summary.files}
+
+    second = TriTrackWriter(tmp_path, timestamp=timestamp, output_format=OutputFormat.BOTH)
+    second_summary = second.close()
+
+    assert len(second_summary.files) == len(original_files) == 6
+    assert all(info.path not in original_files for info in second_summary.files)
+    assert all(path.read_bytes() == original for path, original in original_files.items())
