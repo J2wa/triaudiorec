@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import List, Optional
 
@@ -76,6 +77,7 @@ class MainWindow(QMainWindow):
         self._mic_devices: List[AudioDeviceInfo] = []
         self._sys_devices: List[AudioDeviceInfo] = []
         self._populating_devices = False
+        self._loading_config = True
 
         self.setWindowTitle(f"{__app_name__} v{__version__} — 3-Output Hi-Fi Stereo Recorder")
         self.setMinimumSize(1020, 680)
@@ -84,8 +86,9 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._load_config_into_widgets()
+        self._loading_config = False
+        self._on_mixer_changed()
         self._refresh_devices()
-        self._start_live_monitoring()
 
         # 30 FPS UI telemetry timer for smooth stereo metering and recording clock
         self._ui_timer = QTimer(self)
@@ -330,7 +333,7 @@ class MainWindow(QMainWindow):
         fmt_lbl.setObjectName("MutedLabel")
         self._format_combo = QComboBox()
         for fmt in OutputFormat:
-            self._format_combo.addItem(fmt.label, fmt)
+            self._format_combo.addItem(fmt.label, fmt.value)
         self._format_combo.currentIndexChanged.connect(self._on_settings_changed)
 
         sr_lbl = QLabel("Sample Rate (Stereo)")
@@ -338,6 +341,7 @@ class MainWindow(QMainWindow):
         self._sr_combo = QComboBox()
         self._sr_combo.addItem("48,000 Hz — Studio Standard Hi-Fi", 48000)
         self._sr_combo.addItem("96,000 Hz — Master Hi-Res", 96000)
+        self._sr_combo.addItem("88,200 Hz", 88200)
         self._sr_combo.addItem("44,100 Hz — CD Standard", 44100)
         self._sr_combo.currentIndexChanged.connect(self._on_settings_changed)
 
@@ -345,7 +349,7 @@ class MainWindow(QMainWindow):
         bd_lbl.setObjectName("MutedLabel")
         self._bitdepth_combo = QComboBox()
         for bd in BitDepth:
-            self._bitdepth_combo.addItem(bd.label, bd)
+            self._bitdepth_combo.addItem(bd.label, bd.value)
         self._bitdepth_combo.currentIndexChanged.connect(self._on_settings_changed)
 
         grid.addWidget(fmt_lbl, 0, 0)
@@ -430,7 +434,7 @@ class MainWindow(QMainWindow):
         self._sys_mute_btn.setChecked(self._config.system_muted)
         self._limiter_cb.setChecked(self._config.limiter_enabled)
 
-        fmt_idx = self._format_combo.findData(self._config.output_format)
+        fmt_idx = self._format_combo.findData(self._config.output_format.value)
         if fmt_idx >= 0:
             self._format_combo.setCurrentIndex(fmt_idx)
 
@@ -438,7 +442,7 @@ class MainWindow(QMainWindow):
         if sr_idx >= 0:
             self._sr_combo.setCurrentIndex(sr_idx)
 
-        bd_idx = self._bitdepth_combo.findData(self._config.bit_depth)
+        bd_idx = self._bitdepth_combo.findData(self._config.bit_depth.value)
         if bd_idx >= 0:
             self._bitdepth_combo.setCurrentIndex(bd_idx)
 
@@ -447,6 +451,8 @@ class MainWindow(QMainWindow):
         self._update_file_previews()
 
     def _refresh_devices(self) -> None:
+        if self._engine.state in (EngineState.RECORDING, EngineState.PAUSED):
+            return
         self._populating_devices = True
         try:
             self._mic_devices = self._engine.list_microphones()
@@ -480,8 +486,7 @@ class MainWindow(QMainWindow):
         finally:
             self._populating_devices = False
 
-        if self._engine.state is EngineState.MONITORING:
-            self._start_live_monitoring()
+        self._start_live_monitoring()
 
     def _start_live_monitoring(self) -> None:
         mic_id = self._mic_combo.currentData()
@@ -492,10 +497,12 @@ class MainWindow(QMainWindow):
             self._engine.start_monitoring(mic_device_id=mic_id, system_device_id=sys_id)
         except Exception as exc:
             self._error_label.setText(str(exc))
+        else:
+            self._error_label.setText(self._engine.get_snapshot().last_error or "")
 
     def _update_file_previews(self) -> None:
         prefix = self._prefix_edit.text().strip() or "session"
-        fmt: OutputFormat = self._format_combo.currentData() or OutputFormat.WAV
+        fmt = self._config.output_format
         ext = "wav + .flac" if fmt is OutputFormat.BOTH else fmt.value
         self._mic_file_preview.setText(f"{prefix}_<timestamp>_1_mic.{ext}")
         self._sys_file_preview.setText(f"{prefix}_<timestamp>_2_system.{ext}")
@@ -512,6 +519,8 @@ class MainWindow(QMainWindow):
         self._start_live_monitoring()
 
     def _on_mixer_changed(self) -> None:
+        if self._loading_config:
+            return
         mic_db = self._mic_gain_slider.value() / 10.0
         sys_db = self._sys_gain_slider.value() / 10.0
         self._mic_gain_val.setText(f"{mic_db:+.1f} dB")
@@ -526,17 +535,17 @@ class MainWindow(QMainWindow):
         )
 
     def _on_settings_changed(self) -> None:
-        if self._engine.state in (EngineState.RECORDING, EngineState.PAUSED):
+        if self._loading_config or self._engine.state in (EngineState.RECORDING, EngineState.PAUSED):
             return
-        self._config.output_format = self._format_combo.currentData() or OutputFormat.WAV
         new_sr = int(self._sr_combo.currentData() or 48000)
-        self._config.bit_depth = self._bitdepth_combo.currentData() or BitDepth.PCM_24
+        self._config.output_format = OutputFormat(self._format_combo.currentData())
+        self._config.bit_depth = BitDepth(self._bitdepth_combo.currentData())
         self._config.session_prefix = self._prefix_edit.text().strip() or "session"
         self._update_file_previews()
 
         if new_sr != self._config.sample_rate:
-            self._config.sample_rate = new_sr
-            self._engine.update_config(self._config)
+            self._engine.update_config(replace(self._config, sample_rate=new_sr))
+            self._config = self._engine.config
 
     def _on_browse_folder(self) -> None:
         chosen = QFileDialog.getExistingDirectory(

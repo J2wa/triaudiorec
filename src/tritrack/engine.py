@@ -64,6 +64,8 @@ class RecordingEngine:
         self._config = config or RecorderConfig()
         self._config.validate()
 
+        # Serialize lifecycle changes separately from the lock used by the mixer.
+        self._lifecycle_lock = threading.RLock()
         self._lock = threading.RLock()
         self._state = EngineState.IDLE
 
@@ -130,18 +132,18 @@ class RecordingEngine:
 
     def update_config(self, config: RecorderConfig) -> None:
         """Replace recording configuration (only allowed when not actively recording)."""
-        config.validate()
-        with self._lock:
-            if self._state in (EngineState.RECORDING, EngineState.PAUSED):
-                raise RuntimeError("Stop recording before changing sample rate or output format.")
-            restart_monitor = self._state is EngineState.MONITORING and (
-                config.sample_rate != self._config.sample_rate
-                or config.mic_device_id != self._config.mic_device_id
-                or config.system_device_id != self._config.system_device_id
-            )
-            self._config = config
+        with self._lifecycle_lock:
+            config.validate()
+            with self._lock:
+                if self._state in (EngineState.RECORDING, EngineState.PAUSED):
+                    raise RuntimeError("Stop recording before changing sample rate or output format.")
+                restart_monitor = self._state is EngineState.MONITORING and (
+                    config.sample_rate != self._config.sample_rate
+                    or config.mic_device_id != self._config.mic_device_id
+                    or config.system_device_id != self._config.system_device_id
+                )
+                self._config = config
             if restart_monitor:
-                self.stop_monitoring()
                 self.start_monitoring()
 
     def _make_mic_callback(self, target_sr: int):
@@ -176,111 +178,114 @@ class RecordingEngine:
         system_device_id: Optional[int] = None,
     ) -> None:
         """Open Mic and System Loopback streams and begin live stereo metering."""
-        with self._lock:
-            if self._state in (EngineState.RECORDING, EngineState.PAUSED):
+        with self._lifecycle_lock:
+            state = self.state
+            if state in (EngineState.RECORDING, EngineState.PAUSED):
                 raise RuntimeError("Cannot restart monitoring while recording is active.")
-            if self._state is EngineState.MONITORING:
+            if state is EngineState.MONITORING:
                 self.stop_monitoring()
 
-            if mic_device_id is not None:
-                self._config.mic_device_id = mic_device_id
-            if system_device_id is not None:
-                self._config.system_device_id = system_device_id
+            with self._lock:
+                if mic_device_id is not None:
+                    self._config.mic_device_id = mic_device_id
+                if system_device_id is not None:
+                    self._config.system_device_id = system_device_id
 
-            target_sr = self._config.sample_rate
-            max_buf_frames = max(4096, target_sr // 4)
-            self._mic_buffer = StereoRingBuffer(max_frames=max_buf_frames)
-            self._sys_buffer = StereoRingBuffer(max_frames=max_buf_frames)
-            self._mic_resampler = None
-            self._sys_resampler = None
-            self._last_error = None
+                target_sr = self._config.sample_rate
+                max_buf_frames = max(4096, target_sr // 4)
+                self._mic_buffer = StereoRingBuffer(max_frames=max_buf_frames)
+                self._sys_buffer = StereoRingBuffer(max_frames=max_buf_frames)
+                self._mic_resampler = None
+                self._sys_resampler = None
+                self._last_error = None
 
-            errors: List[str] = []
+                errors: List[str] = []
 
-            if self._config.mic_device_id is not None:
-                try:
-                    self._mic_stream = self._backend.open_microphone_stream(
-                        self._config.mic_device_id,
-                        self._make_mic_callback(target_sr),
-                    )
-                except Exception as exc:
-                    logger.warning("Failed to open microphone stream: %s", exc)
-                    errors.append(f"Mic: {exc}")
-                    self._mic_stream = None
+                if self._config.mic_device_id is not None:
+                    try:
+                        self._mic_stream = self._backend.open_microphone_stream(
+                            self._config.mic_device_id,
+                            self._make_mic_callback(target_sr),
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to open microphone stream: %s", exc)
+                        errors.append(f"Mic: {exc}")
+                        self._mic_stream = None
 
-            if self._config.system_device_id is not None:
-                try:
-                    self._sys_stream = self._backend.open_system_loopback_stream(
-                        self._config.system_device_id,
-                        self._make_sys_callback(target_sr),
-                    )
-                except Exception as exc:
-                    logger.warning("Failed to open system loopback stream: %s", exc)
-                    errors.append(f"System Audio: {exc}")
-                    self._sys_stream = None
+                if self._config.system_device_id is not None:
+                    try:
+                        self._sys_stream = self._backend.open_system_loopback_stream(
+                            self._config.system_device_id,
+                            self._make_sys_callback(target_sr),
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to open system loopback stream: %s", exc)
+                        errors.append(f"System Audio: {exc}")
+                        self._sys_stream = None
 
-            if errors:
-                self._last_error = " | ".join(errors)
+                if errors:
+                    self._last_error = " | ".join(errors)
 
-            self._mixer_stop.clear()
-            self._state = EngineState.MONITORING
-            self._mixer_thread = threading.Thread(
-                target=self._mixer_loop,
-                name="TriTrackMixerLoop",
-                daemon=True,
-            )
-            self._mixer_thread.start()
+                self._mixer_stop.clear()
+                self._state = EngineState.MONITORING
+                self._mixer_thread = threading.Thread(
+                    target=self._mixer_loop,
+                    name="TriTrackMixerLoop",
+                    daemon=True,
+                )
+                self._mixer_thread.start()
 
     def stop_monitoring(self) -> None:
         """Stop live monitoring and release hardware capture streams."""
-        with self._lock:
-            if self._state in (EngineState.RECORDING, EngineState.PAUSED):
-                self.stop_recording()
-            self._mixer_stop.set()
-            thread = self._mixer_thread
-            self._mixer_thread = None
+        with self._lifecycle_lock:
+            self.stop_recording()
+            with self._lock:
+                self._mixer_stop.set()
+                thread = self._mixer_thread
+                self._mixer_thread = None
 
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=2.0)
+            if thread is not None and thread.is_alive():
+                thread.join()
 
-        with self._lock:
-            for stream in (self._mic_stream, self._sys_stream):
-                if stream is not None:
-                    try:
-                        stream.stop()
-                    except Exception:
-                        logger.debug("Error stopping stream", exc_info=True)
-            self._mic_stream = None
-            self._sys_stream = None
-            self._mic_buffer.clear()
-            self._sys_buffer.clear()
-            self._mic_level = StereoLevel()
-            self._sys_level = StereoLevel()
-            self._comb_level = StereoLevel()
-            self._state = EngineState.IDLE
+            with self._lock:
+                for stream in (self._mic_stream, self._sys_stream):
+                    if stream is not None:
+                        try:
+                            stream.stop()
+                        except Exception:
+                            logger.debug("Error stopping stream", exc_info=True)
+                self._mic_stream = None
+                self._sys_stream = None
+                self._mic_buffer.clear()
+                self._sys_buffer.clear()
+                self._mic_level = StereoLevel()
+                self._sys_level = StereoLevel()
+                self._comb_level = StereoLevel()
+                self._state = EngineState.IDLE
 
     def start_recording(self) -> None:
         """Start synchronized 3-output stereo recording immediately."""
-        with self._lock:
-            if self._state in (EngineState.RECORDING, EngineState.PAUSED):
+        with self._lifecycle_lock:
+            state = self.state
+            if state in (EngineState.RECORDING, EngineState.PAUSED):
                 raise RuntimeError("Recording is already active.")
-
-            if self._state is EngineState.IDLE:
+            if state is EngineState.IDLE:
                 self.start_monitoring()
 
-            # Align both buffers tightly at the start of the recording take
-            self._mic_buffer.clear()
-            self._sys_buffer.clear()
-            self._recorded_frames = 0
+            with self._lock:
+                # Align both buffers tightly at the start of the recording take
+                self._mic_buffer.clear()
+                self._sys_buffer.clear()
+                self._recorded_frames = 0
 
-            self._writer = TriTrackWriter(
-                output_dir=Path(self._config.output_dir),
-                session_prefix=self._config.session_prefix,
-                sample_rate=self._config.sample_rate,
-                output_format=self._config.output_format,
-                bit_depth=self._config.bit_depth,
-            )
-            self._state = EngineState.RECORDING
+                self._writer = TriTrackWriter(
+                    output_dir=Path(self._config.output_dir),
+                    session_prefix=self._config.session_prefix,
+                    sample_rate=self._config.sample_rate,
+                    output_format=self._config.output_format,
+                    bit_depth=self._config.bit_depth,
+                )
+                self._state = EngineState.RECORDING
 
     def pause_recording(self) -> None:
         """Pause writing to all 3 outputs while keeping live stereo meters active."""
@@ -298,16 +303,17 @@ class RecordingEngine:
 
     def stop_recording(self) -> Optional[RecordingSummary]:
         """Stop recording, finalize all 3 output files, and return the RecordingSummary."""
-        with self._lock:
-            if self._state not in (EngineState.RECORDING, EngineState.PAUSED):
-                return None
-            writer = self._writer
-            self._writer = None
-            self._state = EngineState.MONITORING if self._mixer_thread else EngineState.IDLE
+        with self._lifecycle_lock:
+            with self._lock:
+                if self._state not in (EngineState.RECORDING, EngineState.PAUSED):
+                    return None
+                writer = self._writer
+                self._writer = None
+                self._state = EngineState.MONITORING if self._mixer_thread else EngineState.IDLE
 
-        if writer is not None:
-            return writer.close()
-        return None
+            if writer is not None:
+                return writer.close()
+            return None
 
     def get_snapshot(self) -> EngineSnapshot:
         """Return an immutable snapshot of current recording status and L/R levels."""
@@ -370,7 +376,12 @@ class RecordingEngine:
                 self._sys_level = sys_lvl
                 self._comb_level = comb_lvl
 
-                if state is EngineState.RECORDING and writer is not None and self._writer is writer:
+                if (
+                    state is EngineState.RECORDING
+                    and self._state is EngineState.RECORDING
+                    and writer is not None
+                    and self._writer is writer
+                ):
                     try:
                         writer.write_block(out1_mic, out2_sys, out3_comb)
                         self._recorded_frames = writer.total_frames
@@ -386,5 +397,6 @@ class RecordingEngine:
 
     def shutdown(self) -> None:
         """Stop all activity and release the audio backend."""
-        self.stop_monitoring()
-        self._backend.close()
+        with self._lifecycle_lock:
+            self.stop_monitoring()
+            self._backend.close()
